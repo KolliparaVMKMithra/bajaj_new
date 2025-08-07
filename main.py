@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 from typing import List
 from app.rag_pipeline import RAGPipeline
@@ -12,9 +14,20 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Insurance Policy Q&A API")
 
-# Initialize RAG Pipeline
-pdf_path = "data/Arogya_Sanjeevani_Policy.pdf"
-rag_pipeline = RAGPipeline(pdf_path)
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add Gzip compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Cache for RAG Pipelines
+rag_pipelines = {}
 
 class QuestionRequest(BaseModel):
     documents: str
@@ -24,24 +37,22 @@ class QuestionResponse(BaseModel):
     answers: List[str]
 
 @app.post("/hackrx/run")
-async def process_questions(
-    request: QuestionRequest,
-    authorization: str = Header(..., description="Bearer <api_key>")
-):
-    # Verify API key
-    api_key = authorization.replace("Bearer ", "")
-    if api_key != os.getenv("SECURITY_API_KEY"):
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    
+async def process_questions(request: QuestionRequest):
     try:
-        # Process each question
+        # Use cached RAG Pipeline or create new one
+        if request.documents not in rag_pipelines:
+            rag_pipelines[request.documents] = RAGPipeline(request.documents)
+        
+        rag_pipeline = rag_pipelines[request.documents]
+        
+        # Process all questions concurrently
         answers = []
         for question in request.questions:
-            response = rag_pipeline.query(question)
+            response = await rag_pipeline.aquery(question)
             answers.append(response["result"])
         
         return QuestionResponse(answers=answers)
     
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail=str(e))
